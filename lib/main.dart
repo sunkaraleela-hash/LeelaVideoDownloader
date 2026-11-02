@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -40,20 +40,24 @@ class _MyHomePageState extends State<MyHomePage> {
 
   String _quality = 'Best available';
   String? _outputDirectory;
+
   bool _isDownloading = false;
+  bool _isPreviewing = false;
+
   double _progress = 0;
   String _status = 'వీడియో URL నమోదు చేయండి';
+
+  Map<String, dynamic>? _videoInfo;
 
   String get _root => Directory.current.path;
   String get _separator => Platform.pathSeparator;
 
-  String get _ytDlpPath =>
-      '$_root${_separator}tools${_separator}yt-dlp.exe';
+  String get _ytDlpPath => '$_root${_separator}tools${_separator}yt-dlp.exe';
+
   String get _ffmpegPath =>
       '$_root${_separator}tools${_separator}ffmpeg${_separator}ffmpeg.exe';
 
-  String get _defaultOutputDirectory =>
-      '$_root${_separator}downloads';
+  String get _defaultOutputDirectory => '$_root${_separator}downloads';
 
   @override
   void dispose() {
@@ -67,6 +71,14 @@ class _MyHomePageState extends State<MyHomePage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
+  }
+
+  bool _isValidUrl(String url) {
+    final uri = Uri.tryParse(url);
+
+    return uri != null &&
+        uri.hasAuthority &&
+        (uri.scheme == 'https' || uri.scheme == 'http');
   }
 
   Future<void> _chooseFolder() async {
@@ -84,6 +96,181 @@ class _MyHomePageState extends State<MyHomePage> {
     } catch (e) {
       _showMessage('ఫోల్డర్ ఎంచుకోవడంలో సమస్య: $e');
     }
+  }
+
+  // Read video metadata without downloading the video.
+  Future<void> _previewVideo() async {
+    if (_isDownloading || _isPreviewing) return;
+
+    final url = _urlController.text.trim();
+
+    if (!_isValidUrl(url)) {
+      _showMessage('సరైన http లేదా https వీడియో URL నమోదు చేయండి.');
+      return;
+    }
+
+    final ytDlp = File(_ytDlpPath);
+
+    if (!await ytDlp.exists()) {
+      _showMessage('yt-dlp.exe దొరకలేదు: $_ytDlpPath');
+      return;
+    }
+
+    setState(() {
+      _isPreviewing = true;
+      _videoInfo = null;
+      _status = 'వీడియో వివరాలు సేకరిస్తున్నాం...';
+    });
+
+    try {
+      final result = await Process.run(
+        _ytDlpPath,
+        [
+          '--dump-single-json',
+          '--skip-download',
+          '--no-warnings',
+          '--no-playlist',
+          '--',
+          url,
+        ],
+        runInShell: false,
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      );
+
+      if (!mounted) return;
+
+      if (result.exitCode != 0) {
+        final error = result.stderr.toString().trim();
+        throw Exception(
+          error.isEmpty ? 'వీడియో వివరాలు పొందలేకపోయాం.' : error,
+        );
+      }
+
+      final decoded = jsonDecode(result.stdout.toString());
+
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException(
+          'వీడియో వివరాలు సరైన ఫార్మాట్‌లో లేవు.',
+        );
+      }
+
+      setState(() {
+        _videoInfo = decoded;
+        _status = 'వీడియో వివరాలు సిద్ధంగా ఉన్నాయి';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _videoInfo = null;
+        _status = 'Preview విఫలమైంది';
+      });
+
+      _showMessage('Preview సమస్య: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isPreviewing = false);
+      }
+    }
+  }
+
+  String _formatDuration(dynamic seconds) {
+    final total = seconds is num ? seconds.toInt() : 0;
+    final hours = total ~/ 3600;
+    final minutes = (total % 3600) ~/ 60;
+    final secs = total % 60;
+
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
+    }
+
+    return '$minutes:${secs.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildVideoPreview() {
+    final info = _videoInfo;
+    if (info == null) return const SizedBox.shrink();
+
+    final thumbnail = info['thumbnail']?.toString();
+    final title = info['title']?.toString() ?? 'తెలియని వీడియో';
+    final uploader = info['uploader']?.toString() ??
+        info['channel']?.toString() ??
+        'తెలియదు';
+    final duration = _formatDuration(info['duration']);
+    final width = info['width'] ?? '?';
+    final height = info['height'] ?? '?';
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (thumbnail != null && thumbnail.isNotEmpty)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(
+                  thumbnail,
+                  width: double.infinity,
+                  height: 220,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const SizedBox(
+                      height: 150,
+                      child: Center(
+                        child: Icon(
+                          Icons.image_not_supported,
+                          size: 45,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Divider(height: 24),
+            _infoRow(Icons.person, 'Uploader', uploader),
+            _infoRow(Icons.timer, 'Duration', duration),
+            _infoRow(
+              Icons.high_quality,
+              'Resolution',
+              '$width × $height',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Icon(icon, size: 19),
+          const SizedBox(width: 8),
+          Text(
+            '$label: ',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   String _formatSelector() {
@@ -104,14 +291,11 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<void> _download() async {
-    if (_isDownloading) return;
+    if (_isDownloading || _isPreviewing) return;
 
     final url = _urlController.text.trim();
-    final uri = Uri.tryParse(url);
 
-    if (uri == null ||
-        !uri.hasAuthority ||
-        !(uri.scheme == 'https' || uri.scheme == 'http')) {
+    if (!_isValidUrl(url)) {
       _showMessage('సరైన http లేదా https వీడియో URL నమోదు చేయండి.');
       return;
     }
@@ -129,8 +313,7 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
-    final outputDirectory =
-        _outputDirectory ?? _defaultOutputDirectory;
+    final outputDirectory = _outputDirectory ?? _defaultOutputDirectory;
 
     try {
       await Directory(outputDirectory).create(recursive: true);
@@ -173,8 +356,7 @@ class _MyHomePageState extends State<MyHomePage> {
       await for (final line in process.stdout
           .transform(utf8.decoder)
           .transform(const LineSplitter())) {
-        final match = RegExp(r'\[download\]\s+([\d.]+)%')
-            .firstMatch(line);
+        final match = RegExp(r'\[download\]\s+([\d.]+)%').firstMatch(line);
 
         if (match != null) {
           final percent = double.tryParse(match.group(1)!) ?? 0;
@@ -187,20 +369,23 @@ class _MyHomePageState extends State<MyHomePage> {
           }
         } else if (line.contains('[Merger]')) {
           if (mounted) {
-            setState(() => _status = 'వీడియో, ఆడియో కలుపుతోంది...');
+            setState(() {
+              _status = 'వీడియో, ఆడియో కలుపుతోంది...';
+            });
           }
         } else if (line.contains('[download] Destination:')) {
           if (mounted) {
-            setState(() => _status = 'వీడియో ఫైల్ డౌన్‌లోడ్ అవుతోంది...');
+            setState(() {
+              _status = 'వీడియో ఫైల్ డౌన్‌లోడ్ అవుతోంది...';
+            });
           }
         }
       }
 
       final exitCode = await process.exitCode;
       final stderrLines = await stderrFuture;
-      final errorText = stderrLines
-          .where((line) => line.trim().isNotEmpty)
-          .join('\n');
+      final errorText =
+          stderrLines.where((line) => line.trim().isNotEmpty).join('\n');
 
       if (!mounted) return;
 
@@ -239,6 +424,7 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   Widget build(BuildContext context) {
     final folder = _outputDirectory ?? _defaultOutputDirectory;
+    final busy = _isDownloading || _isPreviewing;
 
     return Scaffold(
       appBar: AppBar(
@@ -266,7 +452,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 const SizedBox(height: 24),
                 TextField(
                   controller: _urlController,
-                  enabled: !_isDownloading,
+                  enabled: !busy,
                   keyboardType: TextInputType.url,
                   decoration: const InputDecoration(
                     labelText: 'Video URL',
@@ -308,7 +494,7 @@ class _MyHomePageState extends State<MyHomePage> {
                       child: Text('480p'),
                     ),
                   ],
-                  onChanged: _isDownloading
+                  onChanged: busy
                       ? null
                       : (value) {
                           if (value != null) {
@@ -318,7 +504,27 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(height: 16),
                 OutlinedButton.icon(
-                  onPressed: _isDownloading ? null : _chooseFolder,
+                  onPressed: busy ? null : _previewVideo,
+                  icon: _isPreviewing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Icon(Icons.preview),
+                  label: Text(
+                    _isPreviewing
+                        ? 'వివరాలు సేకరిస్తున్నాం...'
+                        : 'Preview Video',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildVideoPreview(),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: busy ? null : _chooseFolder,
                   icon: const Icon(Icons.folder_open),
                   label: const Text('సేవ్ చేసే ఫోల్డర్ ఎంచుకోండి'),
                 ),
@@ -329,7 +535,7 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(height: 24),
                 FilledButton.icon(
-                  onPressed: _isDownloading ? null : _download,
+                  onPressed: busy ? null : _download,
                   icon: const Icon(Icons.download),
                   label: Text(
                     _isDownloading ? 'Downloading...' : 'Download Video',
@@ -365,6 +571,3 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 }
-
-
-
